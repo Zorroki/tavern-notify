@@ -152,7 +152,33 @@ function sanitizeBarkConfig(value) {
         return null;
     }
 
+    bark.serverUrl = normalizeBarkServerUrl(bark.serverUrl, bark.deviceKey);
+
     return bark;
+}
+
+function normalizeBarkServerUrl(serverUrl, deviceKey) {
+    const fallback = 'https://api.day.app';
+    const rawValue = normalizeString(serverUrl) || fallback;
+
+    try {
+        const parsed = new URL(rawValue);
+        let segments = parsed.pathname.split('/').filter(Boolean);
+
+        if (segments.at(-1) === 'push') {
+            segments = segments.slice(0, -1);
+        }
+
+        const deviceKeyIndex = segments.findIndex(segment => decodeURIComponent(segment) === deviceKey);
+        if (deviceKeyIndex >= 0) {
+            segments = segments.slice(0, deviceKeyIndex);
+        }
+
+        parsed.pathname = segments.length > 0 ? `/${segments.join('/')}` : '/';
+        return parsed.toString().replace(/\/+$/, '');
+    } catch {
+        return rawValue.replace(/\/+$/, '').replace(/\/push$/, '');
+    }
 }
 
 function sanitizeJobMeta(value) {
