@@ -24,7 +24,9 @@ export const MODULE_NAME = 'tavern-notify';
 
 const EXTENSION_NAME = 'third-party/tavern-notify';
 const PLUGIN_ROUTE = '/api/plugins/tavern-notify';
-const WEB_PUSH_SW_PATH = `${PLUGIN_ROUTE}/webpush/sw.js`;
+const WEB_PUSH_SW_VERSION = '20260314-1';
+const WEB_PUSH_SW_BASENAME = `${PLUGIN_ROUTE}/webpush/sw.js`;
+const WEB_PUSH_SW_PATH = `${WEB_PUSH_SW_BASENAME}?v=${WEB_PUSH_SW_VERSION}`;
 const CHAT_STATE_KEY = 'tavernNotify';
 const POLL_INTERVAL_MS = 5000;
 const PLUGIN_PROBE_TTL_MS = 30000;
@@ -286,8 +288,43 @@ async function fetchWebPushConfig() {
 }
 
 async function getWebPushRegistration() {
-    await navigator.serviceWorker.register(WEB_PUSH_SW_PATH, { scope: '/' });
+    await unregisterStaleWebPushWorkers();
+    const registration = await navigator.serviceWorker.register(WEB_PUSH_SW_PATH, {
+        scope: '/',
+        updateViaCache: 'none',
+    });
+    await registration.update().catch(error => {
+        logDebug('Failed to update web push service worker.', {
+            message: error instanceof Error ? error.message : String(error),
+        });
+    });
+    logDebug('Web push service worker registration ready.', {
+        activeScriptUrl: registration.active?.scriptURL || '',
+        waitingScriptUrl: registration.waiting?.scriptURL || '',
+        installingScriptUrl: registration.installing?.scriptURL || '',
+    });
     return await navigator.serviceWorker.ready;
+}
+
+async function unregisterStaleWebPushWorkers() {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    for (const registration of registrations) {
+        const scriptUrl = registration.active?.scriptURL
+            || registration.waiting?.scriptURL
+            || registration.installing?.scriptURL
+            || '';
+
+        if (!scriptUrl.includes(WEB_PUSH_SW_BASENAME)) {
+            continue;
+        }
+
+        if (scriptUrl.includes(`v=${WEB_PUSH_SW_VERSION}`)) {
+            continue;
+        }
+
+        logDebug('Unregistering stale web push service worker.', { scriptUrl });
+        await registration.unregister();
+    }
 }
 
 async function getWebPushSubscription() {
@@ -880,6 +917,34 @@ async function sendWebPushTestNotification() {
     toastr.success('测试网页通知已发送。', '酒馆后台通知');
 }
 
+async function sendLocalWebPushTestNotification() {
+    if (!isWebPushSupported()) {
+        throw new Error('当前浏览器不支持网页通知。');
+    }
+
+    const environmentIssue = getWebPushEnvironmentIssue();
+    if (environmentIssue) {
+        throw new Error(environmentIssue);
+    }
+
+    if (Notification.permission !== 'granted') {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') {
+            throw new Error('浏览器通知权限未授予。');
+        }
+    }
+
+    const registration = await getWebPushRegistration();
+    await registration.showNotification(buildNotificationTitle(), {
+        body: '这是一条本地通知测试消息。',
+        tag: `tavern-notify-local-${Date.now()}`,
+        data: {
+            url: window.location.href,
+        },
+    });
+    logDebug('Local web notification test shown.');
+}
+
 async function onDebugToggle() {
     onSettingInput();
     await syncServerDebugMode();
@@ -967,6 +1032,15 @@ function bindUi() {
             await sendWebPushTestNotification();
         } catch (error) {
             toastr.error(error instanceof Error ? error.message : '发送网页通知测试失败。', '酒馆后台通知');
+        }
+    });
+
+    $('#tavern_notify_webpush_local_test').off('click').on('click', async () => {
+        try {
+            await sendLocalWebPushTestNotification();
+            toastr.success('本地通知测试已发送。', '酒馆后台通知');
+        } catch (error) {
+            toastr.error(error instanceof Error ? error.message : '发送本地通知测试失败。', '酒馆后台通知');
         }
     });
 }
