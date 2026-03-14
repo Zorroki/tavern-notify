@@ -1,0 +1,11 @@
+{
+  "name": "sillytavern-tavern-notify",
+  "version": "0.1.0",
+  "description": "SillyTavern background generation plugin with Bark notifications.",
+  "type": "module",
+  "main": "server/index.mjs",
+  "scripts": {
+    "check": "node --check server/index.mjs && node --check index.js"
+  },
+  "license": "MIT"
+}

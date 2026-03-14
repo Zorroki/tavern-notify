@@ -1,0 +1,44 @@
+.tavernNotify_settings {
+    margin-top: 8px;
+}
+
+.tavernNotify_hint {
+    margin: 0 0 12px;
+    opacity: 0.8;
+}
+
+.tavernNotify_row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 12px 0;
+    flex-wrap: wrap;
+}
+
+.tavernNotify_grid {
+    display: grid;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.tavernNotify_status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 26px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    font-size: 0.9em;
+}
+
+.tavernNotify_status.is-ok {
+    background: rgba(84, 182, 121, 0.18);
+}
+
+.tavernNotify_status.is-error {
+    background: rgba(209, 84, 84, 0.18);
+}
+
+.tavernNotify_actions {
+    margin: 12px 0 6px;
+}
