@@ -1,13 +1,11 @@
 import {
-    createPrivateKey,
-    createSign,
-    generateKeyPairSync,
     randomUUID,
 } from 'node:crypto';
 import {
     readFile,
     writeFile,
 } from 'node:fs/promises';
+import webpush from './vendor/web-push.cjs';
 
 const MODULE_NAME = '[TavernNotify]';
 const JOB_TTL_MS = 24 * 60 * 60 * 1000;
@@ -188,20 +186,30 @@ export async function init(router) {
         }
     });
 
+    router.post('/webpush/ack', (request, response) => {
+        const endpoint = normalizeString(request.body?.endpoint);
+        const notificationId = normalizeString(request.body?.notificationId);
+
+        if (endpoint && notificationId) {
+            acknowledgeQueuedWebPushNotification(endpoint, notificationId);
+        }
+
+        return response.json({ ok: true });
+    });
+
     router.get('/webpush/pull', async (request, response) => {
         try {
-            const owner = getOwnerKey(request);
             const endpoint = normalizeString(request.query?.endpoint);
             if (!endpoint) {
                 throw new Error('Missing Web Push endpoint.');
             }
 
-            const notifications = pullWebPushNotifications(owner, endpoint);
-            debugLog(owner, 'Pulled queued Web Push notifications.', {
+            const result = pullWebPushNotifications(endpoint);
+            debugLog(result.owner, 'Pulled queued Web Push notifications.', {
                 endpoint,
-                count: notifications.length,
+                count: result.notifications.length,
             });
-            return response.json({ notifications });
+            return response.json({ notifications: result.notifications });
         } catch (error) {
             return response.status(400).json({
                 error: true,
@@ -232,6 +240,19 @@ export async function init(router) {
                 message: error instanceof Error ? error.message : 'Failed to send Web Push test notification.',
             });
         }
+    });
+
+    router.get('/webpush/debug-event', (request, response) => {
+        const endpoint = normalizeString(request.query?.endpoint);
+        const event = normalizeString(request.query?.event) || 'unknown';
+        const detail = normalizeString(request.query?.detail);
+        const owner = resolveWebPushOwnerByEndpoint(endpoint) || getOwnerKey(request);
+
+        debugLog(owner, `Service Worker event: ${event}`, {
+            endpoint: endpoint || '(unknown)',
+            detail,
+        });
+        return response.json({ ok: true });
     });
 
     await ensureWebPushState();
@@ -543,14 +564,14 @@ async function loadWebPushState() {
         const raw = await readFile(WEB_PUSH_STATE_FILE, 'utf8');
         const parsed = JSON.parse(raw);
 
-        if (parsed?.vapid?.publicKey && parsed?.vapid?.privateKeyPem) {
+        if (parsed?.vapid?.publicKey && parsed?.vapid?.privateKey) {
             webPushVapid = {
                 publicKey: normalizeString(parsed.vapid.publicKey),
-                privateKeyPem: String(parsed.vapid.privateKeyPem),
+                privateKey: normalizeString(parsed.vapid.privateKey),
             };
         }
 
-        if (!webPushVapid?.publicKey || !webPushVapid?.privateKeyPem) {
+        if (!webPushVapid?.publicKey || !webPushVapid?.privateKey) {
             webPushVapid = createVapidKeyPair();
         }
 
@@ -560,6 +581,11 @@ async function loadWebPushState() {
             webPushSubscriptions.set(subscription.endpoint, {
                 endpoint: subscription.endpoint,
                 owner: normalizeString(entry.owner) || 'default',
+                keys: {
+                    p256dh: normalizeString(entry.keys?.p256dh),
+                    auth: normalizeString(entry.keys?.auth),
+                },
+                expirationTime: typeof entry.expirationTime === 'number' ? entry.expirationTime : null,
                 createdAt: normalizeString(entry.createdAt) || new Date().toISOString(),
                 updatedAt: normalizeString(entry.updatedAt) || new Date().toISOString(),
             });
@@ -575,23 +601,7 @@ async function loadWebPushState() {
 }
 
 function createVapidKeyPair() {
-    const { publicKey, privateKey } = generateKeyPairSync('ec', {
-        namedCurve: 'prime256v1',
-    });
-    const publicJwk = publicKey.export({ format: 'jwk' });
-    const rawPublicKey = Buffer.concat([
-        Buffer.from([0x04]),
-        base64UrlToBuffer(publicJwk.x),
-        base64UrlToBuffer(publicJwk.y),
-    ]);
-
-    return {
-        publicKey: bufferToBase64Url(rawPublicKey),
-        privateKeyPem: privateKey.export({
-            format: 'pem',
-            type: 'pkcs8',
-        }).toString(),
-    };
+    return webpush.generateVAPIDKeys();
 }
 
 async function persistWebPushState() {
@@ -629,15 +639,24 @@ function sanitizeWebPushSubscription(value, { allowMissingOwner = false } = {}) 
     }
 
     const owner = normalizeString(value.owner);
+    const keys = value.keys && typeof value.keys === 'object' && !Array.isArray(value.keys)
+        ? {
+            p256dh: normalizeString(value.keys.p256dh),
+            auth: normalizeString(value.keys.auth),
+        }
+        : { p256dh: '', auth: '' };
     if (!allowMissingOwner && !owner) {
         return {
             endpoint: parsedUrl.toString(),
+            keys,
         };
     }
 
     return {
         endpoint: parsedUrl.toString(),
         owner,
+        keys,
+        expirationTime: typeof value.expirationTime === 'number' ? value.expirationTime : null,
     };
 }
 
@@ -647,6 +666,11 @@ async function upsertWebPushSubscription(owner, subscription) {
     webPushSubscriptions.set(subscription.endpoint, {
         endpoint: subscription.endpoint,
         owner,
+        keys: {
+            p256dh: normalizeString(subscription.keys?.p256dh),
+            auth: normalizeString(subscription.keys?.auth),
+        },
+        expirationTime: subscription.expirationTime ?? null,
         createdAt: existing?.createdAt || now,
         updatedAt: now,
     });
@@ -668,19 +692,18 @@ async function removeWebPushSubscription(owner, endpoint) {
     await persistWebPushState();
 }
 
-function pullWebPushNotifications(owner, endpoint) {
+function pullWebPushNotifications(endpoint) {
     const subscription = webPushSubscriptions.get(endpoint);
     if (!subscription) {
         throw new Error('Web Push subscription not found.');
     }
 
-    if (subscription.owner !== owner) {
-        throw new Error('Web Push subscription does not belong to the current user.');
-    }
-
     const notifications = webPushPendingNotifications.get(endpoint) || [];
     webPushPendingNotifications.delete(endpoint);
-    return notifications;
+    return {
+        owner: subscription.owner || 'default',
+        notifications,
+    };
 }
 
 function getWebPushSubscriptionsForOwner(owner) {
@@ -688,10 +711,33 @@ function getWebPushSubscriptionsForOwner(owner) {
         .filter(subscription => subscription.owner === owner);
 }
 
+function resolveWebPushOwnerByEndpoint(endpoint) {
+    if (!endpoint) {
+        return '';
+    }
+
+    return normalizeString(webPushSubscriptions.get(endpoint)?.owner);
+}
+
 function enqueueWebPushNotification(endpoint, notification) {
     const queue = webPushPendingNotifications.get(endpoint) || [];
     queue.push(notification);
     webPushPendingNotifications.set(endpoint, queue.slice(-20));
+}
+
+function acknowledgeQueuedWebPushNotification(endpoint, notificationId) {
+    const queue = webPushPendingNotifications.get(endpoint);
+    if (!queue?.length) {
+        return;
+    }
+
+    const nextQueue = queue.filter(notification => notification.id !== notificationId);
+    if (nextQueue.length === 0) {
+        webPushPendingNotifications.delete(endpoint);
+        return;
+    }
+
+    webPushPendingNotifications.set(endpoint, nextQueue);
 }
 
 async function sendWebPushNotifications({ owner, title, body, currentUrl, endpoint = '', tag = '' }) {
@@ -718,8 +764,10 @@ async function sendWebPushNotifications({ owner, title, body, currentUrl, endpoi
         tag: tag || `tavern-notify-${Date.now()}`,
         data: {
             url: normalizeString(currentUrl),
+            notificationId: '',
         },
     };
+    notification.data.notificationId = notification.id;
 
     for (const subscription of subscriptions) {
         enqueueWebPushNotification(subscription.endpoint, notification);
@@ -731,8 +779,12 @@ async function sendWebPushNotifications({ owner, title, body, currentUrl, endpoi
 
     for (const subscription of subscriptions) {
         try {
-            await sendEmptyWebPush(subscription.endpoint, subject);
+            const statusCode = await sendWebPushMessage(subscription, notification, subject);
             acceptedCount += 1;
+            debugLog(owner, 'Push service accepted Web Push delivery.', {
+                endpoint: subscription.endpoint,
+                statusCode,
+            });
         } catch (error) {
             if (isExpiredWebPushSubscription(error)) {
                 webPushSubscriptions.delete(subscription.endpoint);
@@ -767,55 +819,58 @@ async function sendWebPushNotifications({ owner, title, body, currentUrl, endpoi
     };
 }
 
-async function sendEmptyWebPush(endpoint, subject) {
-    const vapid = await ensureWebPushState();
-    const endpointUrl = new URL(endpoint);
-    const jwt = createVapidJwt(endpointUrl.origin, subject, vapid.privateKeyPem);
-    const headers = {
-        TTL: String(WEB_PUSH_TTL_SECONDS),
-        Urgency: 'high',
-        'Content-Length': '0',
-    };
-
-    if (isGooglePushEndpoint(endpointUrl)) {
-        headers.Authorization = `WebPush ${jwt}`;
-        headers['Crypto-Key'] = `p256ecdsa=${vapid.publicKey}`;
-    } else {
-        headers.Authorization = `vapid t=${jwt}, k=${vapid.publicKey}`;
-    }
-
-    const response = await fetch(endpointUrl, {
-        method: 'POST',
-        headers,
-    });
-    if (!response.ok) {
-        const payload = await readResponseBody(response);
-        const error = buildRequestError(response, payload);
-        error.status = response.status;
-        throw error;
-    }
+function hasWebPushEncryptionKeys(subscription) {
+    return Boolean(
+        normalizeString(subscription?.keys?.p256dh)
+        && normalizeString(subscription?.keys?.auth),
+    );
 }
 
-function createVapidJwt(audience, subject, privateKeyPem) {
-    const header = bufferToBase64Url(Buffer.from(JSON.stringify({
-        alg: 'ES256',
-        typ: 'JWT',
-    })));
-    const payload = bufferToBase64Url(Buffer.from(JSON.stringify({
-        aud: audience,
-        exp: Math.floor(Date.now() / 1000) + (12 * 60 * 60),
-        sub: subject || WEB_PUSH_SUBJECT,
-    })));
-    const unsignedToken = `${header}.${payload}`;
-    const signature = createSign('SHA256')
-        .update(unsignedToken)
-        .end()
-        .sign({
-            key: createPrivateKey(privateKeyPem),
-            dsaEncoding: 'ieee-p1363',
-        });
+async function sendWebPushMessage(subscription, notification, subject) {
+    if (!hasWebPushEncryptionKeys(subscription)) {
+        return await sendEmptyWebPush(subscription.endpoint, subject);
+    }
 
-    return `${unsignedToken}.${bufferToBase64Url(signature)}`;
+    const vapid = await ensureWebPushState();
+    const response = await webpush.sendNotification(
+        {
+            endpoint: subscription.endpoint,
+            keys: {
+                p256dh: subscription.keys.p256dh,
+                auth: subscription.keys.auth,
+            },
+        },
+        JSON.stringify(notification),
+        {
+            TTL: WEB_PUSH_TTL_SECONDS,
+            urgency: 'high',
+            vapidDetails: {
+                subject,
+                publicKey: vapid.publicKey,
+                privateKey: vapid.privateKey,
+            },
+        },
+    );
+
+    return typeof response?.statusCode === 'number' ? response.statusCode : 201;
+}
+
+async function sendEmptyWebPush(endpoint, subject) {
+    const vapid = await ensureWebPushState();
+    const response = await webpush.sendNotification(
+        { endpoint },
+        null,
+        {
+            TTL: WEB_PUSH_TTL_SECONDS,
+            urgency: 'high',
+            vapidDetails: {
+                subject,
+                publicKey: vapid.publicKey,
+                privateKey: vapid.privateKey,
+            },
+        },
+    );
+    return typeof response?.statusCode === 'number' ? response.statusCode : 201;
 }
 
 function resolveWebPushSubject(currentUrl) {
@@ -832,11 +887,6 @@ function resolveWebPushSubject(currentUrl) {
     }
 
     return WEB_PUSH_SUBJECT;
-}
-
-function isGooglePushEndpoint(endpointUrl) {
-    return /(^|\.)googleapis\.com$/i.test(endpointUrl.hostname)
-        || /(^|\.)fcm\.googleapis\.com$/i.test(endpointUrl.hostname);
 }
 
 function isExpiredWebPushSubscription(error) {
@@ -1096,14 +1146,6 @@ function cloneJson(value) {
 
 function normalizeString(value) {
     return typeof value === 'string' ? value.trim() : '';
-}
-
-function bufferToBase64Url(value) {
-    return Buffer.from(value)
-        .toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/g, '');
 }
 
 function base64UrlToBuffer(value) {
