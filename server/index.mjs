@@ -417,7 +417,9 @@ async function sendBarkNotification({ bark, jobMeta, failed, bodyText = '' }) {
         return;
     }
 
-    const serverUrl = String(bark.serverUrl || 'https://api.day.app').replace(/\/+$/, '');
+    const serverUrl = String(bark.serverUrl || 'https://api.day.app')
+        .replace(/\/+$/, '')
+        .replace(/\/push$/, '');
     const title = bark.title || '酒馆后台通知';
     const subtitle = normalizeString(jobMeta?.characterName);
     const message = String(
@@ -427,38 +429,40 @@ async function sendBarkNotification({ bark, jobMeta, failed, bodyText = '' }) {
             : bark.successText || '回复已生成，请回到酒馆查看。'),
     ).trim();
 
-    const requestBody = {
-        device_key: bark.deviceKey,
-        title,
-        body: message,
-    };
+    const pathSegments = [
+        encodeURIComponent(bark.deviceKey),
+        encodeURIComponent(title),
+    ];
 
     if (subtitle) {
-        requestBody.subtitle = subtitle;
-    }
-    if (bark.group) {
-        requestBody.group = bark.group;
-    }
-    if (bark.sound) {
-        requestBody.sound = bark.sound;
-    }
-    if (bark.icon) {
-        requestBody.icon = bark.icon;
-    }
-    if (bark.level) {
-        requestBody.level = bark.level;
-    }
-    if (bark.url || jobMeta?.currentUrl) {
-        requestBody.url = bark.url || jobMeta.currentUrl;
+        pathSegments.push(encodeURIComponent(subtitle));
     }
 
-    const response = await fetch(`${serverUrl}/${encodeURIComponent(bark.deviceKey)}`, {
-        method: 'POST',
+    pathSegments.push(encodeURIComponent(message));
+
+    const requestUrl = new URL(`${serverUrl}/${pathSegments.join('/')}`);
+
+    if (bark.group) {
+        requestUrl.searchParams.set('group', bark.group);
+    }
+    if (bark.sound) {
+        requestUrl.searchParams.set('sound', bark.sound);
+    }
+    if (bark.icon) {
+        requestUrl.searchParams.set('icon', bark.icon);
+    }
+    if (bark.level) {
+        requestUrl.searchParams.set('level', bark.level);
+    }
+    if (bark.url || jobMeta?.currentUrl) {
+        requestUrl.searchParams.set('url', bark.url || jobMeta.currentUrl);
+    }
+
+    const response = await fetch(requestUrl, {
+        method: 'GET',
         headers: {
             accept: 'application/json',
-            'content-type': 'application/json',
         },
-        body: JSON.stringify(requestBody),
     });
     if (!response.ok) {
         const payload = await readResponseBody(response);
