@@ -59,6 +59,8 @@ enableServerPluginsAutoUpdate: true
 
 可以直接在 SillyTavern 扩展管理里通过仓库地址安装。
 
+服务端所需的 Web Push 运行时代码已经随仓库一起提交，不依赖酒馆在拉取插件后再执行 `npm install`。
+
 如果手工放文件，目标目录仍然是：
 
 ```text
