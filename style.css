@@ -15,6 +15,12 @@
     flex-wrap: wrap;
 }
 
+.tavernNotify_row strong,
+.tavernNotify_status,
+.tavernNotify_settings .menu_button {
+    white-space: nowrap;
+}
+
 .tavernNotify_grid {
     display: grid;
     gap: 8px;
@@ -40,5 +46,8 @@
 }
 
 .tavernNotify_actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
     margin: 12px 0 6px;
 }
