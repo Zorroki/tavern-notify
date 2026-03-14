@@ -1,0 +1,109 @@
+<div class="tavernNotify_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>酒馆后台通知</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <p class="tavernNotify_hint">
+                将单聊里的普通回复和重新生成转为后台任务，等你回到页面后再自动同步回当前聊天。
+            </p>
+
+            <label class="checkbox_label" for="tavern_notify_enabled">
+                <input id="tavern_notify_enabled" type="checkbox" />
+                <span>启用单聊后台接管</span>
+            </label>
+
+            <label class="checkbox_label" for="tavern_notify_debug_enabled">
+                <input id="tavern_notify_debug_enabled" type="checkbox" />
+                <span>开启调试日志</span>
+            </label>
+
+            <label class="checkbox_label" for="tavern_notify_standalone_refresh_button">
+                <input id="tavern_notify_standalone_refresh_button" type="checkbox" />
+                <span>在生成菜单显示“刷新页面”</span>
+            </label>
+
+            <div class="tavernNotify_row">
+                <strong>插件状态</strong>
+                <span id="tavern_notify_status" class="tavernNotify_status">检测中...</span>
+                <button id="tavern_notify_probe" class="menu_button">检测插件</button>
+            </div>
+
+            <div class="tavernNotify_row">
+                <strong>通知方式</strong>
+                <label class="tavernNotify_option" for="tavern_notify_channel_bark">
+                    <input id="tavern_notify_channel_bark" type="radio" name="tavern_notify_channel" value="bark" />
+                    <span>Bark</span>
+                </label>
+                <label class="tavernNotify_option" for="tavern_notify_channel_webpush">
+                    <input id="tavern_notify_channel_webpush" type="radio" name="tavern_notify_channel" value="webpush" />
+                    <span>网页通知</span>
+                </label>
+            </div>
+
+            <div class="tavernNotify_grid">
+                <label for="tavern_notify_title_prefix">通知标题</label>
+                <input id="tavern_notify_title_prefix" class="text_pole" type="text" placeholder="酒馆后台通知" />
+            </div>
+
+            <div id="tavern_notify_bark_panel" class="tavernNotify_panel">
+                <div class="tavernNotify_grid">
+                    <label for="tavern_notify_bark_server">Bark 服务地址</label>
+                    <input id="tavern_notify_bark_server" class="text_pole" type="text" placeholder="https://api.day.app" />
+
+                    <label for="tavern_notify_bark_device">Bark Device Key</label>
+                    <input id="tavern_notify_bark_device" class="text_pole" type="text" placeholder="xxxxxxxxxxxx" />
+
+                    <label for="tavern_notify_bark_icon">Bark 图标地址</label>
+                    <input id="tavern_notify_bark_icon" class="text_pole" type="text" placeholder="留空时自动使用当前酒馆图标" />
+
+                    <label for="tavern_notify_bark_group">Bark 分组</label>
+                    <input id="tavern_notify_bark_group" class="text_pole" type="text" placeholder="SillyTavern" />
+
+                    <label for="tavern_notify_bark_sound">Bark 提示音</label>
+                    <input id="tavern_notify_bark_sound" class="text_pole" type="text" placeholder="bell" />
+                </div>
+
+                <p class="tavernNotify_hint">
+                    图标留空时会优先尝试当前酒馆页面里的 PNG / ICO 图标。手动填写时建议使用可直接访问的 HTTP(S) 图片地址；SVG、localhost 或容器内地址在 Bark 里经常不会显示。
+                </p>
+
+                <label class="checkbox_label" for="tavern_notify_open_url">
+                    <input id="tavern_notify_open_url" type="checkbox" />
+                    <span>点击 Bark 通知时打开当前 SillyTavern 页面</span>
+                </label>
+
+                <div class="tavernNotify_actions">
+                    <button id="tavern_notify_test" class="menu_button">发送 Bark 测试通知</button>
+                </div>
+            </div>
+
+            <div id="tavern_notify_webpush_panel" class="tavernNotify_panel is-hidden">
+                <div class="tavernNotify_row">
+                    <strong>网页推送状态</strong>
+                    <span id="tavern_notify_webpush_status" class="tavernNotify_status">检测中...</span>
+                    <button id="tavern_notify_webpush_subscribe" class="menu_button">立即订阅</button>
+                    <button id="tavern_notify_webpush_unsubscribe" class="menu_button">取消订阅</button>
+                </div>
+
+                <div class="tavernNotify_actions">
+                    <button id="tavern_notify_webpush_local_test" class="menu_button">发送本地通知测试</button>
+                    <button id="tavern_notify_webpush_test" class="menu_button">发送网页通知测试</button>
+                </div>
+
+                <p class="tavernNotify_hint">
+                    网页通知需要 HTTPS 安全上下文和浏览器通知权限。iPhone / iPad 上通常还需要把酒馆加入主屏幕后再从图标打开。
+                </p>
+            </div>
+
+            <p class="tavernNotify_hint">
+                当前接管单角色聊天中的普通回复和重新生成。群聊、重抽、继续生成、扮演等流程仍然走 SillyTavern 原生逻辑。无论选择 Bark 还是网页通知，都只发送状态提示，不展示回复正文。
+            </p>
+
+            <p class="tavernNotify_hint">
+                会在“重新生成”所在的生成菜单里额外加入一个“刷新页面”选项，方便需要时手动重载当前页面。
+            </p>
+        </div>
+    </div>
+</div>
