@@ -5,6 +5,7 @@
 .tavernNotify_hint {
     margin: 0 0 12px;
     opacity: 0.8;
+    line-height: 1.45;
 }
 
 .tavernNotify_row {
@@ -25,6 +26,12 @@
     display: grid;
     gap: 8px;
     margin: 12px 0;
+}
+
+.tavernNotify_option {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .tavernNotify_status {
@@ -50,4 +57,12 @@
     flex-wrap: wrap;
     gap: 10px;
     margin: 12px 0 6px;
+}
+
+.tavernNotify_panel {
+    margin: 12px 0;
+}
+
+.tavernNotify_panel.is-hidden {
+    display: none;
 }

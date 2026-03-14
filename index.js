@@ -24,12 +24,19 @@ export const MODULE_NAME = 'tavern-notify';
 
 const EXTENSION_NAME = 'third-party/tavern-notify';
 const PLUGIN_ROUTE = '/api/plugins/tavern-notify';
+const WEB_PUSH_SW_PATH = `${PLUGIN_ROUTE}/webpush/sw.js`;
 const CHAT_STATE_KEY = 'tavernNotify';
 const POLL_INTERVAL_MS = 5000;
 const PLUGIN_PROBE_TTL_MS = 30000;
+const NOTIFICATION_CHANNELS = {
+    bark: 'bark',
+    webpush: 'webpush',
+};
 
 const DEFAULT_SETTINGS = {
     enabled: false,
+    debugEnabled: false,
+    notificationChannel: NOTIFICATION_CHANNELS.bark,
     barkServerUrl: 'https://api.day.app',
     barkDeviceKey: '',
     barkGroup: 'SillyTavern',
@@ -57,7 +64,24 @@ function ensureSettings() {
         }
     }
 
+    if (!Object.values(NOTIFICATION_CHANNELS).includes(extension_settings.tavernNotify.notificationChannel)) {
+        extension_settings.tavernNotify.notificationChannel = DEFAULT_SETTINGS.notificationChannel;
+    }
+
     return extension_settings.tavernNotify;
+}
+
+function logDebug(message, extra = null) {
+    if (!ensureSettings().debugEnabled) {
+        return;
+    }
+
+    if (extra === null) {
+        console.log('[Tavern Notify]', message);
+        return;
+    }
+
+    console.log('[Tavern Notify]', message, extra);
 }
 
 function getChatState(createIfMissing = true) {
@@ -94,6 +118,25 @@ function updateStatus(text, ok = null) {
     }
 }
 
+function updateWebPushStatus(text, ok = null) {
+    const status = $('#tavern_notify_webpush_status');
+    status.text(text);
+    status.removeClass('is-ok is-error');
+
+    if (ok === true) {
+        status.addClass('is-ok');
+    } else if (ok === false) {
+        status.addClass('is-error');
+    }
+}
+
+function updateNotificationPanelVisibility() {
+    const settings = ensureSettings();
+    const useWebPush = settings.notificationChannel === NOTIFICATION_CHANNELS.webpush;
+    $('#tavern_notify_bark_panel').toggleClass('is-hidden', useWebPush);
+    $('#tavern_notify_webpush_panel').toggleClass('is-hidden', !useWebPush);
+}
+
 async function probePlugin(force = false) {
     if (!force && Date.now() - probeState.checkedAt < PLUGIN_PROBE_TTL_MS) {
         updateStatus(probeState.ok ? '插件在线' : '插件不可用', probeState.ok);
@@ -119,7 +162,29 @@ async function probePlugin(force = false) {
     }
 
     updateStatus(probeState.ok ? '插件在线' : '插件不可用', probeState.ok);
+    logDebug('Plugin probe result updated.', probeState);
     return probeState.ok;
+}
+
+async function syncServerDebugMode() {
+    try {
+        await fetch(`${PLUGIN_ROUTE}/debug-mode`, {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                enabled: ensureSettings().debugEnabled,
+            }),
+        });
+    } catch (error) {
+        if (ensureSettings().debugEnabled) {
+            console.warn('[Tavern Notify] 同步服务端调试开关失败。', error);
+        }
+    }
+}
+
+function buildNotificationTitle() {
+    const title = ensureSettings().barkTitlePrefix.trim();
+    return title || DEFAULT_SETTINGS.barkTitlePrefix;
 }
 
 function buildBarkConfig() {
@@ -131,10 +196,321 @@ function buildBarkConfig() {
     return {
         serverUrl: settings.barkServerUrl.trim(),
         deviceKey: settings.barkDeviceKey.trim(),
-        title: settings.barkTitlePrefix.trim(),
+        title: buildNotificationTitle(),
         group: settings.barkGroup.trim(),
         sound: settings.barkSound.trim(),
         url: settings.openUrlOnNotification ? window.location.href : '',
+    };
+}
+
+function isWebPushSupported() {
+    return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+function isIosLikeBrowser() {
+    return /iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+}
+
+function isStandaloneMode() {
+    return window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator.standalone === true;
+}
+
+function getWebPushEnvironmentIssue() {
+    if (!window.isSecureContext) {
+        return '网页通知需要 HTTPS 安全上下文。';
+    }
+
+    if (isIosLikeBrowser() && !isStandaloneMode()) {
+        return 'iPhone / iPad 需要先加入主屏幕，再从图标打开酒馆。';
+    }
+
+    return '';
+}
+
+function base64UrlToUint8Array(value) {
+    const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - normalized.length % 4) % 4);
+    const binary = atob(normalized + padding);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+    }
+
+    return bytes;
+}
+
+function uint8ArrayEquals(left, right) {
+    if (!(left instanceof Uint8Array) || !(right instanceof Uint8Array)) {
+        return false;
+    }
+
+    if (left.length !== right.length) {
+        return false;
+    }
+
+    for (let index = 0; index < left.length; index += 1) {
+        if (left[index] !== right[index]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function getSubscriptionServerKey(subscription) {
+    const key = subscription?.options?.applicationServerKey;
+    if (!key) {
+        return null;
+    }
+
+    try {
+        return new Uint8Array(key);
+    } catch {
+        return null;
+    }
+}
+
+async function fetchWebPushConfig() {
+    const response = await fetch(`${PLUGIN_ROUTE}/webpush/config`, {
+        method: 'GET',
+        headers: getRequestHeaders({ omitContentType: true }),
+    });
+
+    if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.message || '读取网页通知配置失败。');
+    }
+
+    return await response.json();
+}
+
+async function getWebPushRegistration() {
+    await navigator.serviceWorker.register(WEB_PUSH_SW_PATH, { scope: '/' });
+    return await navigator.serviceWorker.ready;
+}
+
+async function getWebPushSubscription() {
+    const registration = await getWebPushRegistration();
+    return await registration.pushManager.getSubscription();
+}
+
+async function saveWebPushSubscription(subscription) {
+    const response = await fetch(`${PLUGIN_ROUTE}/webpush/subscribe`, {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            subscription: subscription?.toJSON ? subscription.toJSON() : subscription,
+        }),
+    });
+
+    if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.message || '保存网页通知订阅失败。');
+    }
+}
+
+async function removeWebPushSubscription(endpoint) {
+    await fetch(`${PLUGIN_ROUTE}/webpush/unsubscribe`, {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            endpoint,
+        }),
+    }).catch(error => {
+        logDebug('Failed to remove web push subscription from server.', {
+            endpoint,
+            message: error instanceof Error ? error.message : String(error),
+        });
+    });
+}
+
+async function refreshWebPushStatus() {
+    const settings = ensureSettings();
+
+    if (!isWebPushSupported()) {
+        updateWebPushStatus('当前浏览器不支持', false);
+        return null;
+    }
+
+    const environmentIssue = getWebPushEnvironmentIssue();
+    if (environmentIssue) {
+        updateWebPushStatus(environmentIssue, false);
+        return null;
+    }
+
+    if (settings.notificationChannel !== NOTIFICATION_CHANNELS.webpush) {
+        updateWebPushStatus('未启用', null);
+        return null;
+    }
+
+    if (!await probePlugin()) {
+        updateWebPushStatus('服务端插件不可用', false);
+        return null;
+    }
+
+    if (Notification.permission === 'denied') {
+        updateWebPushStatus('通知权限已拒绝', false);
+        return null;
+    }
+
+    try {
+        const config = await fetchWebPushConfig();
+        const registration = await getWebPushRegistration();
+        const subscription = await registration.pushManager.getSubscription();
+
+        if (!subscription) {
+            updateWebPushStatus(Notification.permission === 'granted' ? '待订阅' : '等待授权', null);
+            return null;
+        }
+
+        const expectedKey = base64UrlToUint8Array(config.publicKey);
+        const currentKey = getSubscriptionServerKey(subscription);
+        if (currentKey && !uint8ArrayEquals(currentKey, expectedKey)) {
+            updateWebPushStatus('检测到推送密钥变化，请重新订阅', false);
+            return subscription;
+        }
+
+        updateWebPushStatus('已订阅', true);
+        return subscription;
+    } catch (error) {
+        console.warn('[Tavern Notify] 初始化网页通知状态失败。', error);
+        updateWebPushStatus('初始化失败', false);
+        return null;
+    }
+}
+
+async function subscribeWebPush({ interactive = false } = {}) {
+    if (!isWebPushSupported()) {
+        throw new Error('当前浏览器不支持网页通知。');
+    }
+
+    const environmentIssue = getWebPushEnvironmentIssue();
+    if (environmentIssue) {
+        throw new Error(environmentIssue);
+    }
+
+    if (!await probePlugin()) {
+        throw new Error('服务端插件不可用，无法启用网页通知。');
+    }
+
+    if (Notification.permission !== 'granted') {
+        if (!interactive) {
+            updateWebPushStatus('等待授权', null);
+            return null;
+        }
+
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') {
+            updateWebPushStatus(permission === 'denied' ? '通知权限已拒绝' : '等待授权', permission === 'denied' ? false : null);
+            return null;
+        }
+    }
+
+    const config = await fetchWebPushConfig();
+    const expectedKey = base64UrlToUint8Array(config.publicKey);
+    const registration = await getWebPushRegistration();
+    let subscription = await registration.pushManager.getSubscription();
+    const currentKey = getSubscriptionServerKey(subscription);
+
+    if (subscription && currentKey && !uint8ArrayEquals(currentKey, expectedKey)) {
+        await removeWebPushSubscription(subscription.endpoint);
+        await subscription.unsubscribe().catch(error => {
+            logDebug('Failed to locally drop stale web push subscription.', {
+                endpoint: subscription?.endpoint || '',
+                message: error instanceof Error ? error.message : String(error),
+            });
+        });
+        subscription = null;
+    }
+
+    if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: expectedKey,
+        });
+    }
+
+    await saveWebPushSubscription(subscription);
+    updateWebPushStatus('已订阅', true);
+    logDebug('Web push subscription synced.', {
+        endpoint: subscription.endpoint,
+    });
+    return subscription;
+}
+
+async function unsubscribeWebPush() {
+    if (!isWebPushSupported()) {
+        updateWebPushStatus('当前浏览器不支持', false);
+        return;
+    }
+
+    const subscription = await getWebPushSubscription();
+    if (!subscription) {
+        updateWebPushStatus('未订阅', null);
+        return;
+    }
+
+    await removeWebPushSubscription(subscription.endpoint);
+    await subscription.unsubscribe();
+    updateWebPushStatus('未订阅', null);
+    logDebug('Web push subscription removed.', {
+        endpoint: subscription.endpoint,
+    });
+}
+
+async function getCurrentWebPushEndpoint() {
+    try {
+        const subscription = await getWebPushSubscription();
+        return subscription?.endpoint || '';
+    } catch (error) {
+        logDebug('Failed to read current web push endpoint.', {
+            message: error instanceof Error ? error.message : String(error),
+        });
+        return '';
+    }
+}
+
+async function buildNotificationRequest() {
+    const settings = ensureSettings();
+    const title = buildNotificationTitle();
+
+    if (settings.notificationChannel === NOTIFICATION_CHANNELS.webpush) {
+        let subscription = null;
+
+        try {
+            subscription = await subscribeWebPush({ interactive: false });
+        } catch (error) {
+            logDebug('Web push preflight failed before handoff.', {
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+
+        const endpoint = subscription?.endpoint || await getCurrentWebPushEndpoint();
+        return {
+            bark: null,
+            jobMetaPatch: {
+                notificationChannel: NOTIFICATION_CHANNELS.webpush,
+                notificationTitle: title,
+                webPushEndpoint: endpoint,
+            },
+            hint: endpoint
+                ? '生成完成后会通过网页通知提醒你。'
+                : '当前尚未完成网页通知订阅，稍后回到页面时会自动同步结果。',
+        };
+    }
+
+    const bark = buildBarkConfig();
+    return {
+        bark,
+        jobMetaPatch: {
+            notificationChannel: NOTIFICATION_CHANNELS.bark,
+            notificationTitle: title,
+            webPushEndpoint: '',
+        },
+        hint: bark
+            ? '生成完成后会通过 Bark 通知你。'
+            : '当前未配置 Bark，稍后回到页面时会自动同步结果。',
     };
 }
 
@@ -297,6 +673,9 @@ async function syncPendingJobs() {
 
     try {
         const remainingJobs = [];
+        logDebug('Syncing pending jobs.', {
+            count: state.pendingJobs.length,
+        });
 
         for (const pendingJob of state.pendingJobs) {
             try {
@@ -309,6 +688,9 @@ async function syncPendingJobs() {
                     await applyCompletedJob(job);
                     await acknowledgeJob(job.id);
                     toastr.success('后台回复已同步回当前聊天。', '酒馆后台通知');
+                    logDebug('Pending job completed and synced.', {
+                        jobId: job.id,
+                    });
                     continue;
                 }
 
@@ -316,6 +698,10 @@ async function syncPendingJobs() {
                     const message = job.error?.message || '后台生成失败。';
                     toastr.error(message, '酒馆后台通知');
                     await acknowledgeJob(job.id);
+                    logDebug('Pending job failed.', {
+                        jobId: job.id,
+                        message,
+                    });
                     continue;
                 }
 
@@ -339,8 +725,13 @@ async function handoffToBackground(type, abort) {
         return;
     }
 
+    if (ensureSettings().debugEnabled) {
+        await syncServerDebugMode();
+    }
+
     const capturedGenerateData = await captureGenerateData(type);
     const requestGenerateData = await prepareBackgroundGenerateData(context.mainApi, type, capturedGenerateData);
+    const notificationRequest = await buildNotificationRequest();
     const response = await fetch(`${PLUGIN_ROUTE}/jobs`, {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -352,9 +743,10 @@ async function handoffToBackground(type, abort) {
                 chatId: context.chatId,
                 characterName: context.name2,
                 currentUrl: window.location.href,
+                ...notificationRequest.jobMetaPatch,
             },
             providerContext: buildProviderContext(context.mainApi, capturedGenerateData, requestGenerateData),
-            bark: buildBarkConfig(),
+            bark: notificationRequest.bark,
         }),
     });
 
@@ -367,10 +759,12 @@ async function handoffToBackground(type, abort) {
     await savePendingJob(job);
     abort(true);
 
-    const notificationHint = buildBarkConfig()
-        ? '生成完成后会通过 Bark 通知你。'
-        : '稍后回到页面时会自动同步结果。';
-    toastr.success(`后台生成已启动。${notificationHint}`, '酒馆后台通知');
+    logDebug('Background job handed off.', {
+        jobId: job.id,
+        type,
+        notificationChannel: notificationRequest.jobMetaPatch.notificationChannel,
+    });
+    toastr.success(`后台生成已启动。${notificationRequest.hint}`, '酒馆后台通知');
 }
 
 async function backgroundGenerateInterceptor(_chat, _contextSize, abort, type) {
@@ -407,6 +801,8 @@ async function backgroundGenerateInterceptor(_chat, _contextSize, abort, type) {
 function onSettingInput() {
     const settings = ensureSettings();
     settings.enabled = $('#tavern_notify_enabled').prop('checked');
+    settings.debugEnabled = $('#tavern_notify_debug_enabled').prop('checked');
+    settings.notificationChannel = String($('input[name="tavern_notify_channel"]:checked').val() || DEFAULT_SETTINGS.notificationChannel);
     settings.barkServerUrl = String($('#tavern_notify_bark_server').val() || DEFAULT_SETTINGS.barkServerUrl);
     settings.barkDeviceKey = String($('#tavern_notify_bark_device').val() || '');
     settings.barkGroup = String($('#tavern_notify_bark_group').val() || '');
@@ -419,15 +815,18 @@ function onSettingInput() {
 function loadSettingsIntoUi() {
     const settings = ensureSettings();
     $('#tavern_notify_enabled').prop('checked', settings.enabled);
+    $('#tavern_notify_debug_enabled').prop('checked', settings.debugEnabled);
+    $(`input[name="tavern_notify_channel"][value="${settings.notificationChannel}"]`).prop('checked', true);
     $('#tavern_notify_bark_server').val(settings.barkServerUrl);
     $('#tavern_notify_bark_device').val(settings.barkDeviceKey);
     $('#tavern_notify_bark_group').val(settings.barkGroup);
     $('#tavern_notify_bark_sound').val(settings.barkSound);
     $('#tavern_notify_title_prefix').val(settings.barkTitlePrefix);
     $('#tavern_notify_open_url').prop('checked', settings.openUrlOnNotification);
+    updateNotificationPanelVisibility();
 }
 
-async function sendTestNotification() {
+async function sendBarkTestNotification() {
     const bark = buildBarkConfig();
     if (!bark) {
         toastr.error('请先填写 Bark Device Key。', '酒馆后台通知');
@@ -443,6 +842,7 @@ async function sendTestNotification() {
             jobMeta: {
                 characterName: getContext().name2,
                 currentUrl: window.location.href,
+                notificationTitle: buildNotificationTitle(),
             },
         }),
     });
@@ -455,8 +855,66 @@ async function sendTestNotification() {
     toastr.success('测试通知已发送到 Bark。', '酒馆后台通知');
 }
 
+async function sendWebPushTestNotification() {
+    const subscription = await subscribeWebPush({ interactive: true });
+    if (!subscription?.endpoint) {
+        throw new Error('当前浏览器尚未完成网页通知订阅。');
+    }
+
+    const response = await fetch(`${PLUGIN_ROUTE}/webpush/test`, {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            endpoint: subscription.endpoint,
+            currentUrl: window.location.href,
+            title: buildNotificationTitle(),
+            message: '酒馆后台通知网页推送测试',
+        }),
+    });
+
+    if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.message || '发送网页通知测试失败。');
+    }
+
+    toastr.success('测试网页通知已发送。', '酒馆后台通知');
+}
+
+async function onDebugToggle() {
+    onSettingInput();
+    await syncServerDebugMode();
+    if (ensureSettings().debugEnabled) {
+        logDebug('Debug mode enabled.');
+    }
+}
+
+async function onNotificationChannelChange() {
+    onSettingInput();
+    updateNotificationPanelVisibility();
+
+    if (ensureSettings().notificationChannel === NOTIFICATION_CHANNELS.webpush) {
+        await refreshWebPushStatus();
+        try {
+            await subscribeWebPush({ interactive: false });
+        } catch (error) {
+            logDebug('Automatic web push sync skipped after channel change.', {
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+        return;
+    }
+
+    updateWebPushStatus('未启用', null);
+}
+
 function bindUi() {
     $('#tavern_notify_enabled').off('change').on('change', onSettingInput);
+    $('#tavern_notify_debug_enabled').off('change').on('change', () => {
+        void onDebugToggle();
+    });
+    $('input[name="tavern_notify_channel"]').off('change').on('change', () => {
+        void onNotificationChannelChange();
+    });
     $('#tavern_notify_bark_server').off('input').on('input', onSettingInput);
     $('#tavern_notify_bark_device').off('input').on('input', onSettingInput);
     $('#tavern_notify_bark_group').off('input').on('input', onSettingInput);
@@ -470,13 +928,45 @@ function bindUi() {
             ok ? '服务端插件可访问。' : '服务端插件不可访问。',
             '酒馆后台通知',
         );
+
+        if (ensureSettings().notificationChannel === NOTIFICATION_CHANNELS.webpush) {
+            await refreshWebPushStatus();
+        }
     });
 
     $('#tavern_notify_test').off('click').on('click', async () => {
         try {
-            await sendTestNotification();
+            await sendBarkTestNotification();
         } catch (error) {
             toastr.error(error instanceof Error ? error.message : '发送测试通知失败。', '酒馆后台通知');
+        }
+    });
+
+    $('#tavern_notify_webpush_subscribe').off('click').on('click', async () => {
+        try {
+            const subscription = await subscribeWebPush({ interactive: true });
+            if (subscription) {
+                toastr.success('网页通知订阅成功。', '酒馆后台通知');
+            }
+        } catch (error) {
+            toastr.error(error instanceof Error ? error.message : '订阅网页通知失败。', '酒馆后台通知');
+        }
+    });
+
+    $('#tavern_notify_webpush_unsubscribe').off('click').on('click', async () => {
+        try {
+            await unsubscribeWebPush();
+            toastr.success('网页通知订阅已取消。', '酒馆后台通知');
+        } catch (error) {
+            toastr.error(error instanceof Error ? error.message : '取消网页通知失败。', '酒馆后台通知');
+        }
+    });
+
+    $('#tavern_notify_webpush_test').off('click').on('click', async () => {
+        try {
+            await sendWebPushTestNotification();
+        } catch (error) {
+            toastr.error(error instanceof Error ? error.message : '发送网页通知测试失败。', '酒馆后台通知');
         }
     });
 }
@@ -504,12 +994,32 @@ async function init() {
     ensureSettings();
     await mountSettings();
     await probePlugin(true);
+    await syncServerDebugMode();
+
+    if (ensureSettings().notificationChannel === NOTIFICATION_CHANNELS.webpush) {
+        await refreshWebPushStatus();
+
+        try {
+            await subscribeWebPush({ interactive: false });
+        } catch (error) {
+            logDebug('Initial web push sync skipped.', {
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    } else {
+        updateWebPushStatus('未启用', null);
+    }
+
     await syncPendingJobs();
 
     eventSource.on(event_types.CHAT_CHANGED, syncPendingJobs);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             void syncPendingJobs();
+
+            if (ensureSettings().notificationChannel === NOTIFICATION_CHANNELS.webpush) {
+                void refreshWebPushStatus();
+            }
         }
     });
 
