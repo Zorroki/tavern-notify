@@ -19,6 +19,13 @@ import {
     getChatCompletionModel,
     oai_settings,
 } from '../../../openai.js';
+import {
+    createChatOpenAutoScroller,
+    findChatScrollContainer,
+    findChatScrollObserveRoot,
+    scrollContainerToBottom,
+} from './chat-auto-scroll.js';
+import { createDeferredStartupScheduler } from './startup-deferred.js';
 
 export const MODULE_NAME = 'tavern-notify';
 
@@ -58,6 +65,8 @@ let handoffInProgress = false;
 let syncInProgress = false;
 let pollTimer = null;
 let refreshNavigationInProgress = false;
+let chatOpenAutoScroller = null;
+let deferredStartupScheduler = null;
 
 function ensureSettings() {
     if (!extension_settings.tavernNotify || typeof extension_settings.tavernNotify !== 'object') {
@@ -519,6 +528,74 @@ function updateRefreshMenuOption() {
     option.addEventListener('touchend', onPressRefresh, { passive: false });
 
     regenerateOption.insertAdjacentElement('afterend', option);
+}
+
+function ensureChatOpenAutoScroller() {
+    if (chatOpenAutoScroller) {
+        return chatOpenAutoScroller;
+    }
+
+    chatOpenAutoScroller = createChatOpenAutoScroller({
+        // 聊天容器识别集中交给辅助模块，避免宿主 DOM 变化时散落多处修改。
+        findContainer() {
+            return findChatScrollContainer(document);
+        },
+        findObserveRoot() {
+            return findChatScrollObserveRoot(document) || document.body;
+        },
+        scrollToBottom: scrollContainerToBottom,
+        root: document.body,
+        MutationObserverCtor: globalThis.MutationObserver,
+        log(message, extra) {
+            logDebug(message, extra);
+        },
+    });
+
+    return chatOpenAutoScroller;
+}
+
+function onChatChanged() {
+    const context = getContext();
+    if (!context.chatId && !context.groupId) {
+        return;
+    }
+
+    ensureChatOpenAutoScroller().start();
+    void syncPendingJobs();
+}
+
+async function runDeferredStartupTasks() {
+    await probePlugin(true);
+    await syncServerDebugMode();
+
+    if (ensureSettings().notificationChannel === NOTIFICATION_CHANNELS.webpush) {
+        await refreshWebPushStatus();
+
+        try {
+            await subscribeWebPush({ interactive: false });
+        } catch (error) {
+            logDebug('Initial web push sync skipped.', {
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    } else {
+        updateWebPushStatus('未启用', null);
+    }
+
+    await syncPendingJobs();
+}
+
+function ensureDeferredStartupScheduler() {
+    if (deferredStartupScheduler) {
+        return deferredStartupScheduler;
+    }
+
+    deferredStartupScheduler = createDeferredStartupScheduler({
+        // 首屏优先让聊天界面完成挂载，网络与推送同步放到空闲阶段处理。
+        runTasks: runDeferredStartupTasks,
+    });
+
+    return deferredStartupScheduler;
 }
 
 function getSubscriptionServerKey(subscription) {
@@ -1348,27 +1425,10 @@ function startPolling() {
 async function init() {
     ensureSettings();
     await mountSettings();
-    await probePlugin(true);
-    await syncServerDebugMode();
     updateRefreshMenuOption();
+    ensureChatOpenAutoScroller();
 
-    if (ensureSettings().notificationChannel === NOTIFICATION_CHANNELS.webpush) {
-        await refreshWebPushStatus();
-
-        try {
-            await subscribeWebPush({ interactive: false });
-        } catch (error) {
-            logDebug('Initial web push sync skipped.', {
-                message: error instanceof Error ? error.message : String(error),
-            });
-        }
-    } else {
-        updateWebPushStatus('未启用', null);
-    }
-
-    await syncPendingJobs();
-
-    eventSource.on(event_types.CHAT_CHANGED, syncPendingJobs);
+    eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             updateRefreshMenuOption();
@@ -1384,6 +1444,14 @@ async function init() {
     });
 
     startPolling();
+
+    if (ensureSettings().notificationChannel === NOTIFICATION_CHANNELS.webpush) {
+        updateWebPushStatus('初始化中', null);
+    } else {
+        updateWebPushStatus('未启用', null);
+    }
+
+    ensureDeferredStartupScheduler().schedule();
 }
 
 globalThis.TAVERN_NOTIFY_INTERCEPT = backgroundGenerateInterceptor;

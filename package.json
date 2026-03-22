@@ -5,7 +5,7 @@
   "type": "module",
   "main": "server/index.mjs",
   "scripts": {
-    "check": "node --check server/index.mjs && node --check index.js && node --check server/sw.js"
+    "check": "node --check server/index.mjs && node --check index.js && node --check chat-auto-scroll.js && node --check startup-deferred.js && node --check server/sw.js"
   },
   "license": "MIT"
 }
