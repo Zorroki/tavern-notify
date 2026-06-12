@@ -26,6 +26,7 @@ import {
     scrollContainerToBottom,
 } from './chat-auto-scroll.js';
 import { createDeferredStartupScheduler } from './startup-deferred.js';
+import { runPendingJobSync } from './pending-job-sync.js';
 
 export const MODULE_NAME = 'tavern-notify';
 
@@ -1035,61 +1036,26 @@ async function syncPendingJobs() {
         return;
     }
 
-    const context = getContext();
-    if (!context.chatId || context.groupId) {
-        return;
-    }
-
-    const state = getChatState(false);
-    if (!state?.pendingJobs?.length) {
-        return;
-    }
-
     syncInProgress = true;
 
     try {
-        const remainingJobs = [];
-        logDebug('Syncing pending jobs.', {
-            count: state.pendingJobs.length,
-        });
-
-        for (const pendingJob of state.pendingJobs) {
-            try {
-                const job = await fetchJob(pendingJob.id);
-                if (!job) {
-                    continue;
-                }
-
-                if (job.status === 'completed') {
-                    await applyCompletedJob(job);
-                    await acknowledgeJob(job.id);
-                    toastr.success('后台回复已同步回当前聊天。', '酒馆后台通知');
-                    logDebug('Pending job completed and synced.', {
-                        jobId: job.id,
-                    });
-                    continue;
-                }
-
-                if (job.status === 'failed') {
-                    const message = job.error?.message || '后台生成失败。';
-                    toastr.error(message, '酒馆后台通知');
-                    await acknowledgeJob(job.id);
-                    logDebug('Pending job failed.', {
-                        jobId: job.id,
-                        message,
-                    });
-                    continue;
-                }
-
-                remainingJobs.push(pendingJob);
-            } catch (error) {
+        await runPendingJobSync({
+            getContext,
+            getChatState,
+            fetchJob,
+            applyCompletedJob,
+            acknowledgeJob,
+            notifySuccess(message, title) {
+                toastr.success(message, title);
+            },
+            notifyError(message, title) {
+                toastr.error(message, title);
+            },
+            logDebug,
+            warn(error) {
                 console.warn('[Tavern Notify] 同步后台任务失败。', error);
-                remainingJobs.push(pendingJob);
-            }
-        }
-
-        state.pendingJobs = remainingJobs;
-        await context.saveMetadata();
+            },
+        });
     } finally {
         syncInProgress = false;
     }
