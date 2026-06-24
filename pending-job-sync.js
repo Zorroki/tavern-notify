@@ -10,6 +10,24 @@ function isTerminalJob(job) {
     return !job || job.status === 'completed' || job.status === 'failed';
 }
 
+function isCurrentClientJob(pendingJob, clientId) {
+    return Boolean(clientId) && pendingJob?.clientId === clientId;
+}
+
+function shouldReloadBeforeTerminalSync(results, clientId) {
+    return results.some(result => {
+        if (result.error || !isTerminalJob(result.job)) {
+            return false;
+        }
+
+        if (!result.job) {
+            return true;
+        }
+
+        return !isCurrentClientJob(result.pendingJob, clientId);
+    });
+}
+
 async function fetchPendingJobResults(pendingJobs, fetchJob, warn) {
     const results = [];
 
@@ -37,60 +55,20 @@ function hasTerminalResult(results) {
     return results.some(result => !result.error && isTerminalJob(result.job));
 }
 
-export async function runPendingJobSync({
+async function applyPendingJobResults({
+    state,
+    results,
     getContext,
-    getChatState,
-    fetchJob,
     applyCompletedJob,
     acknowledgeJob,
     notifySuccess,
     notifyError,
-    logDebug = () => {},
-    warn = () => {},
-} = {}) {
-    const initialContext = getContext();
-    if (!isSingleChatContext(initialContext)) {
-        return { status: 'skipped' };
-    }
-
-    const initialPendingJobs = getPendingJobs(getChatState(false));
-    if (initialPendingJobs.length === 0) {
-        return { status: 'skipped' };
-    }
-
-    logDebug('Syncing pending jobs.', {
-        count: initialPendingJobs.length,
-    });
-
-    const initialResults = await fetchPendingJobResults(initialPendingJobs, fetchJob, warn);
-    if (!hasTerminalResult(initialResults)) {
-        return { status: 'unchanged' };
-    }
-
-    if (typeof initialContext.reloadCurrentChat !== 'function') {
-        warn(new Error('reloadCurrentChat is unavailable; pending job sync was skipped to avoid saving stale chat.'));
-        return { status: 'skipped' };
-    }
-
-    const chatId = initialContext.chatId;
-    await initialContext.reloadCurrentChat();
-
-    const freshContext = getContext();
-    if (!isSingleChatContext(freshContext) || freshContext.chatId !== chatId) {
-        return { status: 'skipped' };
-    }
-
-    const freshState = getChatState(false);
-    const freshPendingJobs = getPendingJobs(freshState);
-    if (freshPendingJobs.length === 0) {
-        return { status: 'unchanged' };
-    }
-
-    const freshResults = await fetchPendingJobResults(freshPendingJobs, fetchJob, warn);
+    logDebug,
+}) {
     const remainingJobs = [];
     let changed = false;
 
-    for (const { pendingJob, job, error } of freshResults) {
+    for (const { pendingJob, job, error } of results) {
         if (error) {
             remainingJobs.push(pendingJob);
             continue;
@@ -131,13 +109,90 @@ export async function runPendingJobSync({
         return { status: 'unchanged' };
     }
 
-    const latestState = getChatState(false);
-    if (!latestState) {
+    if (!state) {
         return { status: 'skipped' };
     }
 
-    latestState.pendingJobs = remainingJobs;
+    state.pendingJobs = remainingJobs;
     await getContext().saveMetadata();
 
     return { status: 'synced' };
+}
+
+export async function runPendingJobSync({
+    getContext,
+    getChatState,
+    getClientId = () => '',
+    fetchJob,
+    applyCompletedJob,
+    acknowledgeJob,
+    notifySuccess,
+    notifyError,
+    logDebug = () => {},
+    warn = () => {},
+} = {}) {
+    const initialContext = getContext();
+    if (!isSingleChatContext(initialContext)) {
+        return { status: 'skipped' };
+    }
+
+    const initialState = getChatState(false);
+    const initialPendingJobs = getPendingJobs(initialState);
+    if (initialPendingJobs.length === 0) {
+        return { status: 'skipped' };
+    }
+
+    logDebug('Syncing pending jobs.', {
+        count: initialPendingJobs.length,
+    });
+
+    const initialResults = await fetchPendingJobResults(initialPendingJobs, fetchJob, warn);
+    if (!hasTerminalResult(initialResults)) {
+        return { status: 'unchanged' };
+    }
+
+    const clientId = getClientId();
+    if (!shouldReloadBeforeTerminalSync(initialResults, clientId)) {
+        return await applyPendingJobResults({
+            state: initialState,
+            results: initialResults,
+            getContext,
+            applyCompletedJob,
+            acknowledgeJob,
+            notifySuccess,
+            notifyError,
+            logDebug,
+        });
+    }
+
+    if (typeof initialContext.reloadCurrentChat !== 'function') {
+        warn(new Error('reloadCurrentChat is unavailable; pending job sync was skipped to avoid saving stale chat.'));
+        return { status: 'skipped' };
+    }
+
+    const chatId = initialContext.chatId;
+    await initialContext.reloadCurrentChat();
+
+    const freshContext = getContext();
+    if (!isSingleChatContext(freshContext) || freshContext.chatId !== chatId) {
+        return { status: 'skipped' };
+    }
+
+    const freshState = getChatState(false);
+    const freshPendingJobs = getPendingJobs(freshState);
+    if (freshPendingJobs.length === 0) {
+        return { status: 'unchanged' };
+    }
+
+    const freshResults = await fetchPendingJobResults(freshPendingJobs, fetchJob, warn);
+    return await applyPendingJobResults({
+        state: getChatState(false),
+        results: freshResults,
+        getContext,
+        applyCompletedJob,
+        acknowledgeJob,
+        notifySuccess,
+        notifyError,
+        logDebug,
+    });
 }

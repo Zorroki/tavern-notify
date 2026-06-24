@@ -43,6 +43,7 @@ const NOTIFICATION_CHANNELS = {
     bark: 'bark',
     webpush: 'webpush',
 };
+const CLIENT_INSTANCE_ID = createClientInstanceId();
 
 const DEFAULT_SETTINGS = {
     enabled: false,
@@ -68,6 +69,14 @@ let pollTimer = null;
 let refreshNavigationInProgress = false;
 let chatOpenAutoScroller = null;
 let deferredStartupScheduler = null;
+
+function createClientInstanceId() {
+    try {
+        return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    } catch {
+        return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+}
 
 function ensureSettings() {
     if (!extension_settings.tavernNotify || typeof extension_settings.tavernNotify !== 'object') {
@@ -975,6 +984,7 @@ async function savePendingJob(job) {
             id: job.id,
             createdAt: job.createdAt,
             mainApi: job.mainApi,
+            clientId: CLIENT_INSTANCE_ID,
         });
         await context.saveMetadata();
     }
@@ -1042,6 +1052,9 @@ async function syncPendingJobs() {
         await runPendingJobSync({
             getContext,
             getChatState,
+            getClientId() {
+                return CLIENT_INSTANCE_ID;
+            },
             fetchJob,
             applyCompletedJob,
             acknowledgeJob,

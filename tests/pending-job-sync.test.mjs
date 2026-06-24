@@ -112,6 +112,62 @@ test('runPendingJobSync 只会在重新加载后的新聊天上写入已完成�
     ]);
 });
 
+test('runPendingJobSync 处理当前页面创建的已完成任务时不重新加载聊天', async () => {
+    const events = [];
+    const completedJob = {
+        id: 'job-current',
+        status: 'completed',
+    };
+    const context = {
+        chatId: 'chat-1',
+        groupId: null,
+        async reloadCurrentChat() {
+            events.push('reload');
+        },
+        async saveMetadata() {
+            events.push(`save-${currentState.version}`);
+        },
+    };
+    const currentState = {
+        version: 'current',
+        pendingJobs: [{
+            id: 'job-current',
+            createdAt: '2026-06-24T00:00:00.000Z',
+            mainApi: 'openai',
+            clientId: 'client-a',
+        }],
+    };
+
+    const result = await runPendingJobSync(createNoopDependencies({
+        getContext: () => context,
+        getChatState: () => currentState,
+        getClientId: () => 'client-a',
+        async fetchJob(jobId) {
+            events.push(`fetch-${jobId}-${currentState.version}`);
+            return completedJob;
+        },
+        async applyCompletedJob(job) {
+            events.push(`apply-${job.id}-${currentState.version}`);
+        },
+        async acknowledgeJob(jobId) {
+            events.push(`ack-${jobId}`);
+        },
+        notifySuccess() {
+            events.push('success');
+        },
+    }));
+
+    assert.equal(result.status, 'synced');
+    assert.deepEqual(currentState.pendingJobs, []);
+    assert.deepEqual(events, [
+        'fetch-job-current-current',
+        'apply-job-current-current',
+        'ack-job-current',
+        'success',
+        'save-current',
+    ]);
+});
+
 test('runPendingJobSync 遇到仍在运行的任务时不重新加载也不保存聊天', async () => {
     const events = [];
     const context = {
