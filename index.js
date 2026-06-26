@@ -25,6 +25,7 @@ import {
     findChatScrollObserveRoot,
     scrollContainerToBottom,
 } from './chat-auto-scroll.js';
+import { createJankDiagnostics } from './jank-diagnostics.js';
 import { createDeferredStartupScheduler } from './startup-deferred.js';
 import { runPendingJobSync } from './pending-job-sync.js';
 
@@ -69,6 +70,7 @@ let pollTimer = null;
 let refreshNavigationInProgress = false;
 let chatOpenAutoScroller = null;
 let deferredStartupScheduler = null;
+let jankDiagnostics = null;
 
 function createClientInstanceId() {
     try {
@@ -152,6 +154,128 @@ function updateWebPushStatus(text, ok = null) {
         status.addClass('is-ok');
     } else if (ok === false) {
         status.addClass('is-error');
+    }
+}
+
+function getJankDiagnosticsPendingJobCount() {
+    const state = getChatState(false);
+    return Array.isArray(state?.pendingJobs) ? state.pendingJobs.length : 0;
+}
+
+function getJankDiagnosticsMessageCount() {
+    return document.querySelectorAll('#chat .mes, .mes, .message, [data-message-id]').length;
+}
+
+function getJankDiagnosticsScrollContainer() {
+    return findChatScrollContainer(document, {
+        allowPendingContainer: true,
+    });
+}
+
+function getJankDiagnosticsContextSnapshot() {
+    const container = getJankDiagnosticsScrollContainer();
+    return {
+        messageCount: getJankDiagnosticsMessageCount(),
+        pendingJobCount: getJankDiagnosticsPendingJobCount(),
+        scrollTop: Number(container?.scrollTop || 0),
+        scrollHeight: Number(container?.scrollHeight || 0),
+        clientHeight: Number(container?.clientHeight || 0),
+        visibilityState: document.visibilityState,
+    };
+}
+
+function getJankDiagnosticsEnvironmentSnapshot() {
+    return {
+        viewport: `${window.innerWidth}x${window.innerHeight}`,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        userAgent: navigator.userAgent,
+    };
+}
+
+function formatDiagnosticMs(value) {
+    const number = Number(value || 0);
+    return `${Math.round(number * 10) / 10}ms`;
+}
+
+function formatDiagnosticValue(value) {
+    if (value === undefined || value === null || value === '') {
+        return '未知';
+    }
+    return String(value);
+}
+
+function buildJankDiagnosticsSummaryText(summary) {
+    if (!summary || summary.startedAt === null) {
+        return '尚未开始采样。';
+    }
+
+    const context = summary.latestContext || {};
+    const scroll = summary.latestScroll || {};
+    return [
+        `采样时长：${formatDiagnosticMs(summary.durationMs)}`,
+        `长任务：${summary.longTaskCount} 次，最大 ${formatDiagnosticMs(summary.maxLongTaskDurationMs)}`,
+        `长帧：${summary.longFrameCount} 次，最大帧间隔 ${formatDiagnosticMs(summary.maxFrameIntervalMs)}`,
+        `平均帧间隔：${formatDiagnosticMs(summary.averageFrameIntervalMs)}`,
+        `消息数量：${formatDiagnosticValue(context.messageCount)}，pending job：${formatDiagnosticValue(context.pendingJobCount)}`,
+        `滚动位置：${formatDiagnosticValue(scroll.scrollTop)} / ${formatDiagnosticValue(scroll.scrollHeight)}，可视高度 ${formatDiagnosticValue(scroll.clientHeight)}`,
+        `页面状态：${formatDiagnosticValue(context.visibilityState)}`,
+    ].join('\n');
+}
+
+function renderJankDiagnosticsSummary(summary = null) {
+    const status = $('#tavern_notify_jank_status');
+    if (!status.length) {
+        return;
+    }
+
+    const activeSummary = summary || ensureJankDiagnostics().getSummary();
+    status.text(activeSummary.running ? '采样中' : activeSummary.startedAt === null ? '未采样' : '已停止');
+    status.removeClass('is-ok is-error');
+    if (activeSummary.running) {
+        status.addClass('is-ok');
+    } else if (activeSummary.longTaskCount > 0 || activeSummary.longFrameCount > 0) {
+        status.addClass('is-error');
+    }
+    $('#tavern_notify_jank_output').text(buildJankDiagnosticsSummaryText(activeSummary));
+    $('#tavern_notify_jank_start').prop('disabled', activeSummary.running);
+    $('#tavern_notify_jank_stop').prop('disabled', !activeSummary.running);
+}
+
+function ensureJankDiagnostics() {
+    if (jankDiagnostics) {
+        return jankDiagnostics;
+    }
+
+    jankDiagnostics = createJankDiagnostics({
+        findScrollContainer: getJankDiagnosticsScrollContainer,
+        getContextSnapshot: getJankDiagnosticsContextSnapshot,
+        getEnvironmentSnapshot: getJankDiagnosticsEnvironmentSnapshot,
+        onUpdate(summary) {
+            renderJankDiagnosticsSummary(summary);
+        },
+    });
+
+    return jankDiagnostics;
+}
+
+async function copyTextToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.append(textarea);
+    textarea.select();
+
+    try {
+        document.execCommand('copy');
+    } finally {
+        textarea.remove();
     }
 }
 
@@ -1194,6 +1318,7 @@ function loadSettingsIntoUi() {
     $('#tavern_notify_standalone_refresh_button').prop('checked', settings.standaloneRefreshButton);
     updateNotificationPanelVisibility();
     updateRefreshMenuOption();
+    renderJankDiagnosticsSummary();
 }
 
 async function sendBarkTestNotification() {
@@ -1306,6 +1431,27 @@ async function onNotificationChannelChange() {
     updateWebPushStatus('未启用', null);
 }
 
+function startJankDiagnostics() {
+    ensureJankDiagnostics().start();
+    toastr.info('开始采样，请复现滚动卡顿。', '酒馆后台通知');
+}
+
+function stopJankDiagnostics() {
+    ensureJankDiagnostics().stop();
+    toastr.success('卡顿诊断采样已停止。', '酒馆后台通知');
+}
+
+async function copyJankDiagnosticsReport() {
+    const report = ensureJankDiagnostics().buildReport();
+    await copyTextToClipboard(report);
+    toastr.success('卡顿诊断报告已复制。', '酒馆后台通知');
+}
+
+function clearJankDiagnostics() {
+    ensureJankDiagnostics().clear();
+    toastr.info('卡顿诊断数据已清空。', '酒馆后台通知');
+}
+
 function bindUi() {
     $('#tavern_notify_enabled').off('change').on('change', onSettingInput);
     $('#tavern_notify_debug_enabled').off('change').on('change', () => {
@@ -1322,6 +1468,16 @@ function bindUi() {
     $('#tavern_notify_title_prefix').off('input change').on('input change', onSettingInput);
     $('#tavern_notify_open_url').off('change').on('change', onSettingInput);
     $('#tavern_notify_standalone_refresh_button').off('change').on('change', onSettingInput);
+    $('#tavern_notify_jank_start').off('click').on('click', startJankDiagnostics);
+    $('#tavern_notify_jank_stop').off('click').on('click', stopJankDiagnostics);
+    $('#tavern_notify_jank_copy').off('click').on('click', async () => {
+        try {
+            await copyJankDiagnosticsReport();
+        } catch (error) {
+            toastr.error(error instanceof Error ? error.message : '复制卡顿诊断报告失败。', '酒馆后台通知');
+        }
+    });
+    $('#tavern_notify_jank_clear').off('click').on('click', clearJankDiagnostics);
 
     $('#tavern_notify_probe').off('click').on('click', async () => {
         const ok = await probePlugin(true);

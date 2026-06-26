@@ -97,6 +97,26 @@
                 </p>
             </div>
 
+            <div class="tavernNotify_panel tavernNotify_diagnostics">
+                <div class="tavernNotify_row">
+                    <strong>卡顿诊断</strong>
+                    <span id="tavern_notify_jank_status" class="tavernNotify_status">未采样</span>
+                </div>
+
+                <div class="tavernNotify_actions">
+                    <button id="tavern_notify_jank_start" class="menu_button">开始采样</button>
+                    <button id="tavern_notify_jank_stop" class="menu_button" disabled>停止采样</button>
+                    <button id="tavern_notify_jank_copy" class="menu_button">复制报告</button>
+                    <button id="tavern_notify_jank_clear" class="menu_button">清空</button>
+                </div>
+
+                <pre id="tavern_notify_jank_output" class="tavernNotify_jankOutput">尚未开始采样。</pre>
+
+                <p class="tavernNotify_hint">
+                    开启后会记录长任务、长帧、滚动位置、消息数量和后台任务数量，不记录聊天正文。建议开始采样后立即复现一次卡顿，再停止并复制报告。
+                </p>
+            </div>
+
             <p class="tavernNotify_hint">
                 当前接管单角色聊天中的普通回复和重新生成。群聊、重抽、继续生成、扮演等流程仍然走 SillyTavern 原生逻辑。无论选择 Bark 还是网页通知，都只发送状态提示，不展示回复正文。
             </p>

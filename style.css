@@ -66,3 +66,20 @@
 .tavernNotify_panel.is-hidden {
     display: none;
 }
+
+.tavernNotify_jankOutput {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 108px;
+    max-height: 220px;
+    margin: 8px 0 12px;
+    padding: 10px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.14);
+    font-size: 0.9em;
+    line-height: 1.45;
+}
